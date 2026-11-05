@@ -18,18 +18,63 @@ def is_true(value):
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
+RATE_HEADERS = {
+    "X-RateLimit-Limit": "limit",
+    "X-RateLimit-Remaining": "remaining",
+    "X-RateLimit-Resource": "resource",
+    "X-RateLimit-Window": "window_seconds",
+}
+
+
+def rate_limit(headers):
+    """The quota headers mlab.sh sends on key calls that spend quota, or None."""
+    out = {v: headers[k] for k, v in RATE_HEADERS.items() if k in headers}
+    for k in ("limit", "remaining", "window_seconds"):
+        if str(out.get(k, "")).isdigit():
+            out[k] = int(out[k])
+    return out or None
+
+
+def error_message(status, body, headers):
+    if status == 401:
+        return ("mlab.sh refused the API key (401): it is unknown, revoked or expired. Keys expire after "
+                "90 days by default; create a new one in Organization settings → API keys and re-authenticate the app.")
+    if status == 403:
+        detail = body.get("error") if isinstance(body, dict) else body
+        return "mlab.sh refused the call (403): %s" % (detail or "this API key lacks the permission for this action.")
+    if status == 429:
+        return ("mlab.sh quota spent for this resource (429). Retry after %ss or raise the plan's quota."
+                % headers.get("Retry-After", "3600"))
+    return None
+
+
 def respond(r):
     try:
         body = r.json()
     except ValueError:
         body = r.text
+    limits = rate_limit(r.headers)
     if r.ok:
+        if limits and isinstance(body, dict):
+            body.setdefault("rate_limit", limits)
         return body
-    return {"success": False, "status": r.status_code, "error": body}
+    out = {"success": False, "status": r.status_code, "error": body}
+    message = error_message(r.status_code, body, r.headers)
+    if message:
+        out["message"] = message
+    if r.status_code == 429:
+        out["retry_after"] = int(r.headers.get("Retry-After", "3600"))
+    if limits:
+        out["rate_limit"] = limits
+    return out
+
+
+def failed(result):
+    return isinstance(result, dict) and result.get("success") is False
 
 
 class Mlab(AppBase):
-    __version__ = "1.0.0"
+    __version__ = "1.1.0"
     app_name = "mlab"
 
     def __init__(self, redis, logger, console_logger=None):
@@ -58,17 +103,22 @@ class Mlab(AppBase):
 
     # --- Domain ---------------------------------------------------------------
 
-    def scan_domain(self, apikey, domain, wait_for_completion="true", timeout="120", url=DEFAULT_URL):
+    def scan_domain(self, apikey, domain, wait_for_completion="true", timeout="120", output="report", url=DEFAULT_URL):
+        """Launch a scan; when waiting, return the v2 report (default) or the legacy v1 results."""
         launch = self._core(apikey, url, "POST", "/scan/domain", json={"domain": domain})
-        if not is_true(wait_for_completion) or (isinstance(launch, dict) and launch.get("success") is False):
+        if not is_true(wait_for_completion) or failed(launch):
             return launch
+        path = "/scan/domain/results" if output == "results" else "/scan/domain/report"
 
         deadline = time.time() + int(timeout or 120)
         while time.time() < deadline:
             status = self._core(apikey, url, "GET", "/scan/domain/status", params={"domain": domain})
             state = status.get("status", status.get("state")) if isinstance(status, dict) else None
             if state == "success":
-                return self._core(apikey, url, "GET", "/scan/domain/results", params={"domain": domain})
+                result = self._core(apikey, url, "GET", path, params={"domain": domain})
+                if path.endswith("/report") and isinstance(result, dict) and result.get("status") == "failed":
+                    return {"success": False, "error": 'Domain scan failed for "%s"' % domain, "report": result}
+                return result
             if state == "error" or state is False:
                 return {"success": False, "error": 'Domain scan failed for "%s"' % domain, "status": status}
             time.sleep(4)
@@ -80,7 +130,11 @@ class Mlab(AppBase):
     def get_domain_status(self, apikey, domain, url=DEFAULT_URL):
         return self._core(apikey, url, "GET", "/scan/domain/status", params={"domain": domain})
 
+    def get_domain_report(self, apikey, domain, url=DEFAULT_URL):
+        return self._core(apikey, url, "GET", "/scan/domain/report", params={"domain": domain})
+
     def get_domain_results(self, apikey, domain, url=DEFAULT_URL):
+        """Legacy v1 payload, frozen upstream. Prefer get_domain_report."""
         return self._core(apikey, url, "GET", "/scan/domain/results", params={"domain": domain})
 
     def get_domain_ssl(self, apikey, domain, url=DEFAULT_URL):
@@ -159,6 +213,78 @@ class Mlab(AppBase):
 
     def get_quota(self, apikey, scan_type="domain", url=DEFAULT_URL):
         return self._core(apikey, url, "GET", "/limit/" + scan_type)
+
+    def triage_batch(self, apikey, indicators, url=DEFAULT_URL):
+        """Type, de-duplicate and enrich a paste from mlab.sh's caches. Spends no lookup."""
+        return self._core(apikey, url, "POST", "/scan/batch", json={"indicators": indicators})
+
+    # --- Cases (Team plan) -------------------------------------------------------
+
+    def list_cases(self, apikey, url=DEFAULT_URL):
+        return self._core(apikey, url, "GET", "/cases")
+
+    def get_case(self, apikey, case_uuid, url=DEFAULT_URL):
+        return self._core(apikey, url, "POST", "/cases/detail", json={"uuid": case_uuid})
+
+    def create_case(self, apikey, title, summary="", indicators="", url=DEFAULT_URL):
+        created = self._core(apikey, url, "POST", "/cases/create", json={"title": title, "summary": summary})
+        if indicators.strip() and isinstance(created, dict) and created.get("uuid"):
+            created["indicators"] = self.add_case_indicators(apikey, created["uuid"], indicators, url)
+        return created
+
+    def update_case(self, apikey, case_uuid, title="", summary="", status="", url=DEFAULT_URL):
+        body = {"uuid": case_uuid}
+        if title:
+            body["title"] = title
+        if summary:
+            body["summary"] = summary
+        if status:
+            body["status"] = status
+        return self._core(apikey, url, "POST", "/cases/update", json=body)
+
+    def add_case_indicators(self, apikey, case_uuid, indicators, url=DEFAULT_URL):
+        return self._core(apikey, url, "POST", "/cases/indicator/add", json={"uuid": case_uuid, "indicators": indicators})
+
+    def add_case_comment(self, apikey, case_uuid, comment, indicator_uuid="", url=DEFAULT_URL):
+        body = {"uuid": case_uuid, "body": comment}
+        if indicator_uuid:
+            body["indicator_uuid"] = indicator_uuid
+        return self._core(apikey, url, "POST", "/cases/comment/add", json=body)
+
+    # --- Watchdog (scheduled scans) ------------------------------------------------
+
+    def list_watchdogs(self, apikey, url=DEFAULT_URL):
+        return self._core(apikey, url, "GET", "/scan/watchdog/list")
+
+    def create_watchdog(self, apikey, target, frequency="weekly", scan_type="domain", hour="9", minute="0",
+                        day_of_week="", day_of_month="", url=DEFAULT_URL):
+        body = {"domain": target, "frequency": frequency, "scan_type": scan_type,
+                "hour": int(hour or 9), "minute": int(minute or 0)}
+        if str(day_of_week).strip():
+            body["day_of_week"] = int(day_of_week)
+        if str(day_of_month).strip():
+            body["day_of_month"] = int(day_of_month)
+        return self._core(apikey, url, "POST", "/scan/watchdog/create", json=body)
+
+    def update_watchdog(self, apikey, watchdog_uuid, enabled, url=DEFAULT_URL):
+        return self._core(apikey, url, "POST", "/scan/watchdog/update",
+                          json={"uuid": watchdog_uuid, "enabled": is_true(enabled)})
+
+    def delete_watchdog(self, apikey, watchdog_uuid, url=DEFAULT_URL):
+        return self._core(apikey, url, "POST", "/scan/watchdog/delete", json={"uuid": watchdog_uuid})
+
+    # --- Finding tags (RedKit triage) -------------------------------------------------
+
+    def list_finding_tags(self, apikey, scan_uuid, url=DEFAULT_URL):
+        return self._core(apikey, url, "GET", "/scan/finding-tags", params={"scan_uuid": scan_uuid})
+
+    def add_finding_tag(self, apikey, scan_uuid, finding_id, tag, url=DEFAULT_URL):
+        params = {"scan_uuid": scan_uuid, "finding_id": finding_id, "tag": tag}
+        return self._core(apikey, url, "POST", "/scan/finding-tags/add", params=params, json={})
+
+    def remove_finding_tag(self, apikey, scan_uuid, finding_id, tag, url=DEFAULT_URL):
+        params = {"scan_uuid": scan_uuid, "finding_id": finding_id, "tag": tag}
+        return self._core(apikey, url, "POST", "/scan/finding-tags/remove", params=params, json={})
 
     # --- CVE (public) ---------------------------------------------------------
 

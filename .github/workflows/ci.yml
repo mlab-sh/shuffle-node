@@ -16,4 +16,4 @@ jobs:
           python-version: "3.12"
       - run: pip install requests pyyaml
       - run: python tests/test_app.py
-      - run: docker build mlab/1.0.0
+      - run: docker build mlab/1.1.0

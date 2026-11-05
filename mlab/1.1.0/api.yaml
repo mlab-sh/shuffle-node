@@ -1,6 +1,6 @@
-app_version: 1.0.0
+app_version: 1.1.0
 name: mlab
-description: "mlab.sh: domain / IP / crypto / file / hash / URL / email / phone / MAC scanning, IOC extraction, CVE intelligence and threat-actor data."
+description: "mlab.sh: domain / IP / crypto / file / hash / URL / email / phone / MAC scanning, IOC extraction, batch triage, cases, scheduled scans, finding triage, CVE intelligence and threat-actor data."
 contact_info:
   name: "mlab.sh"
   url: https://mlab.sh
@@ -28,7 +28,7 @@ authentication:
         type: string
 actions:
   - name: scan_domain
-    description: "Launch a domain scan; optionally wait and return full results (subdomains, DNS, SSL, security.txt)"
+    description: "Launch a domain scan; optionally wait and return the v2 report (score, findings, DNS, mail, web, certificates, attack surface)"
     parameters:
       - name: domain
         description: "Domain to scan"
@@ -54,6 +54,16 @@ actions:
         example: "120"
         schema:
           type: string
+      - name: output
+        description: "When waiting: v2 report (default) or legacy v1 results"
+        required: false
+        multiline: false
+        example: "report"
+        schema:
+          type: string
+        options:
+          - "report"
+          - "results"
     returns:
       schema:
         type: string
@@ -70,8 +80,21 @@ actions:
     returns:
       schema:
         type: string
+  - name: get_domain_report
+    description: "v2 report of a domain scan (schema domain-report/2): status completed, partial, failed or in_progress"
+    parameters:
+      - name: domain
+        description: "Domain"
+        required: true
+        multiline: false
+        example: "example.com"
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
   - name: get_domain_results
-    description: "Results of a finished domain scan"
+    description: "Legacy v1 results of a domain scan (frozen upstream, prefer get_domain_report)"
     parameters:
       - name: domain
         description: "Domain"
@@ -370,6 +393,330 @@ actions:
           - "ip"
           - "file"
           - "crypto"
+    returns:
+      schema:
+        type: string
+  - name: triage_batch
+    description: "Type, de-duplicate and enrich up to 200 pasted indicators from mlab.sh's caches; spends no lookup (cold ones come back as needs_lookup)"
+    parameters:
+      - name: indicators
+        description: "Indicators separated by new lines, commas or spaces"
+        required: true
+        multiline: true
+        example: "8.8.8.8\nevil.com"
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: list_cases
+    description: "Cases of the organization (Team plan)"
+    returns:
+      schema:
+        type: string
+  - name: get_case
+    description: "A case with its indicators and comments"
+    parameters:
+      - name: case_uuid
+        description: "Case UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: create_case
+    description: "Create a case, optionally with indicators"
+    parameters:
+      - name: title
+        description: "Case title"
+        required: true
+        multiline: false
+        example: "Phishing wave 2026-11"
+        schema:
+          type: string
+      - name: summary
+        description: "Summary"
+        required: false
+        multiline: true
+        example: ""
+        schema:
+          type: string
+      - name: indicators
+        description: "Indicators to attach (new lines, commas or spaces)"
+        required: false
+        multiline: true
+        example: ""
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: update_case
+    description: "Change a case's title, summary or status (blank fields are kept)"
+    parameters:
+      - name: case_uuid
+        description: "Case UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+      - name: title
+        description: "New title"
+        required: false
+        multiline: false
+        example: ""
+        schema:
+          type: string
+      - name: summary
+        description: "New summary"
+        required: false
+        multiline: true
+        example: ""
+        schema:
+          type: string
+      - name: status
+        description: "Status"
+        required: false
+        multiline: false
+        example: ""
+        schema:
+          type: string
+        options:
+          - ""
+          - "open"
+          - "closed"
+    returns:
+      schema:
+        type: string
+  - name: add_case_indicators
+    description: "Attach indicators to a case; unsupported values come back in skipped"
+    parameters:
+      - name: case_uuid
+        description: "Case UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+      - name: indicators
+        description: "Indicators (new lines, commas or spaces)"
+        required: true
+        multiline: true
+        example: "8.8.8.8"
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: add_case_comment
+    description: "Comment on a case, optionally on one of its indicators"
+    parameters:
+      - name: case_uuid
+        description: "Case UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+      - name: comment
+        description: "Comment text"
+        required: true
+        multiline: true
+        example: "Blocked at the proxy."
+        schema:
+          type: string
+      - name: indicator_uuid
+        description: "Indicator UUID (optional)"
+        required: false
+        multiline: false
+        example: ""
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: list_watchdogs
+    description: "Scheduled scans of the organization"
+    returns:
+      schema:
+        type: string
+  - name: create_watchdog
+    description: "Schedule a recurring scan. Daily is for domain scans only; ip needs a verified range"
+    parameters:
+      - name: target
+        description: "Domain, or verified CIDR range for scan_type ip"
+        required: true
+        multiline: false
+        example: "example.com"
+        schema:
+          type: string
+      - name: frequency
+        description: "Frequency"
+        required: false
+        multiline: false
+        example: "weekly"
+        schema:
+          type: string
+        options:
+          - "daily"
+          - "weekly"
+          - "monthly"
+      - name: scan_type
+        description: "Scanner"
+        required: false
+        multiline: false
+        example: "domain"
+        schema:
+          type: string
+        options:
+          - "domain"
+          - "redkit"
+          - "ip"
+      - name: hour
+        description: "Hour (UTC, 0-23)"
+        required: false
+        multiline: false
+        example: "9"
+        schema:
+          type: string
+      - name: minute
+        description: "Minute (0-59)"
+        required: false
+        multiline: false
+        example: "0"
+        schema:
+          type: string
+      - name: day_of_week
+        description: "Weekly: day 0-6 (0 = Sunday)"
+        required: false
+        multiline: false
+        example: ""
+        schema:
+          type: string
+      - name: day_of_month
+        description: "Monthly: day 1-28"
+        required: false
+        multiline: false
+        example: ""
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: update_watchdog
+    description: "Pause or resume a scheduled scan"
+    parameters:
+      - name: watchdog_uuid
+        description: "Schedule UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+      - name: enabled
+        description: "Enabled"
+        required: true
+        multiline: false
+        example: "true"
+        schema:
+          type: string
+        options:
+          - "true"
+          - "false"
+    returns:
+      schema:
+        type: string
+  - name: delete_watchdog
+    description: "Delete a scheduled scan"
+    parameters:
+      - name: watchdog_uuid
+        description: "Schedule UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: list_finding_tags
+    description: "Triage tags on the findings of a RedKit scan"
+    parameters:
+      - name: scan_uuid
+        description: "Scan UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+    returns:
+      schema:
+        type: string
+  - name: add_finding_tag
+    description: "Tag a finding (syncs linked trackers)"
+    parameters:
+      - name: scan_uuid
+        description: "Scan UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+      - name: finding_id
+        description: "Finding ID"
+        required: true
+        multiline: false
+        example: ""
+        schema:
+          type: string
+      - name: tag
+        description: "Tag"
+        required: true
+        multiline: false
+        example: "false-positive"
+        schema:
+          type: string
+        options:
+          - "false-positive"
+          - "accepted-risk"
+          - "fixed"
+          - "review-later"
+    returns:
+      schema:
+        type: string
+  - name: remove_finding_tag
+    description: "Remove a tag from a finding"
+    parameters:
+      - name: scan_uuid
+        description: "Scan UUID"
+        required: true
+        multiline: false
+        example: "00000000-0000-0000-0000-000000000000"
+        schema:
+          type: string
+      - name: finding_id
+        description: "Finding ID"
+        required: true
+        multiline: false
+        example: ""
+        schema:
+          type: string
+      - name: tag
+        description: "Tag"
+        required: true
+        multiline: false
+        example: "false-positive"
+        schema:
+          type: string
+        options:
+          - "false-positive"
+          - "accepted-risk"
+          - "fixed"
+          - "review-later"
     returns:
       schema:
         type: string
